@@ -7,8 +7,7 @@ from typing import List, Optional, Tuple
 
 import mlx.core as mx
 import mlx.nn as nn
-from mlx_lm.tokenizer_utils import load_tokenizer
-from mlx_lm.utils import load_model
+from mlx_lm.utils import load_model, load_tokenizer
 
 from .logging_config import get_logger
 
@@ -38,12 +37,38 @@ def get_moe_layer_indices(model) -> List[int]:
         layer = model.model.layers[layer_idx]
 
         # Check if this layer has MoE by inspecting structure
-        has_moe = hasattr(layer, "mlp") and hasattr(layer.mlp, "switch_mlp")
+        # Different models use different paths:
+        # - Qwen3/GLM4: layer.mlp.switch_mlp
+        # - MiniMax: layer.block_sparse_moe.switch_mlp
+        has_moe = (
+            (hasattr(layer, "mlp") and hasattr(layer.mlp, "switch_mlp")) or
+            (hasattr(layer, "block_sparse_moe") and hasattr(layer.block_sparse_moe, "switch_mlp"))
+        )
 
         if has_moe:
             moe_layers.append(layer_idx)
 
     return moe_layers
+
+
+def get_moe_block(layer):
+    """Get the MoE block from a layer.
+
+    Different models use different paths:
+    - Qwen3/GLM4: layer.mlp
+    - MiniMax: layer.block_sparse_moe
+
+    Args:
+        layer: Model layer
+
+    Returns:
+        The MoE block containing switch_mlp, or None if not an MoE layer
+    """
+    if hasattr(layer, "mlp") and hasattr(layer.mlp, "switch_mlp"):
+        return layer.mlp
+    elif hasattr(layer, "block_sparse_moe") and hasattr(layer.block_sparse_moe, "switch_mlp"):
+        return layer.block_sparse_moe
+    return None
 
 
 def ensure_experts_exported(
@@ -279,7 +304,8 @@ def load_all_experts_for_layer(
 
     # Replace the switch_mlp weights with the fully loaded weights
     layer = model.model.layers[layer_idx]
-    switch_mlp = layer.mlp.switch_mlp
+    moe_block = get_moe_block(layer)
+    switch_mlp = moe_block.switch_mlp
 
     # Set weights on the projection layer objects (not replace the layers themselves)
     # The projections (gate_proj, up_proj, down_proj) are layer objects with .weight attribute
@@ -337,6 +363,7 @@ def install_fully_loaded_layers(
     # Get num_experts model-agnostically
     num_experts = (
         getattr(model.args, 'n_routed_experts', None) or  # GLM-4
+        getattr(model.args, 'num_local_experts', None) or # MiniMax
         getattr(model.args, 'num_experts', None) or       # Qwen3, Mixtral
         0
     )
@@ -406,6 +433,7 @@ def install_expert_caches(
     # Get num_experts model-agnostically
     num_experts = (
         getattr(model.args, 'n_routed_experts', None) or  # GLM-4
+        getattr(model.args, 'num_local_experts', None) or # MiniMax
         getattr(model.args, 'num_experts', None) or       # Qwen3, Mixtral
         0
     )
@@ -429,12 +457,13 @@ def install_expert_caches(
         expert_caches.append(expert_cache)
 
         # Replace switch_mlp with cached wrapper
+        moe_block = get_moe_block(layer)
         wrapper = CachedSwitchMLPWrapper(
-            layer.mlp.switch_mlp,
+            moe_block.switch_mlp,
             expert_cache,
             layer_idx,
             prompt_handling=prompt_handling,
         )
-        layer.mlp.switch_mlp = wrapper
+        moe_block.switch_mlp = wrapper
 
     return expert_caches
