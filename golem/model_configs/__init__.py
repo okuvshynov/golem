@@ -7,6 +7,7 @@ across different model architectures.
 Supported models:
 - Qwen3 MoE (qwen3_moe, qwen2moe)
 - GLM-4 MoE (glm4_moe, chatglm)
+- MiniMax MoE (minimax)
 
 Usage:
     from golem.model_configs import get_model_config
@@ -21,6 +22,7 @@ from pathlib import Path
 from typing import Dict, Optional, Type
 
 from .glm4 import GLM4ModelConfig
+from .minimax import MiniMaxModelConfig
 from .qwen3 import Qwen3ModelConfig
 from ..logging_config import get_logger
 
@@ -32,6 +34,7 @@ _MODEL_CONFIG_REGISTRY: Dict[str, Type] = {
     "qwen2moe": Qwen3ModelConfig,
     "glm4_moe": GLM4ModelConfig,
     "chatglm": GLM4ModelConfig,
+    "minimax": MiniMaxModelConfig,
 }
 
 
@@ -82,6 +85,7 @@ def get_model_config(
 __all__ = [
     "Qwen3ModelConfig",
     "GLM4ModelConfig",
+    "MiniMaxModelConfig",
     "get_model_config",
     "register_model_config",
 ]
