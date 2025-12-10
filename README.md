@@ -14,6 +14,7 @@ This is a small experiment on dynamic expert reallocation for MoE models. Motiva
 * Models:
   * [GLM-4.6-4bit](https://huggingface.co/mlx-community/GLM-4.6-4bit) - 160 routed experts per layer, 8 selected;
   * [Qwen3-235B-A22B-6bit](https://huggingface.co/mlx-community/Qwen3-235B-A22B-Instruct-2507-6bit) - 128 routed experts per layer, 8 selected;
+  * [MiniMax-M2-6bit](https://huggingface.co/mlx-community/MiniMax-M2-6bit) - 256 routed experts per layer, 8 selected;
 
 ### High-level approach
 
@@ -28,6 +29,7 @@ Charts below can be reproduced with:
 ```
 % CACHE_SIZES=64,80 ./report/gen_report.sh path/to/llms/Qwen3-235B-A22B-Instruct-2507-6bit
 % CACHE_SIZES=96,128 ./report/gen_report.sh path/to/llms/GLM-4.6-4bit
+% CACHE_SIZES=192,224 ./report/gen_report.sh ~/projects/llms/minimax-m2-6bit
 ```
 
 #### Cold start: hitrate by token
@@ -68,15 +70,21 @@ Qwen3-235B-A22B-6bit:
 GLM-4.6-4bit:
 ![GLM-4.6: hit rate by layer](img/GLM-4.6-4bit/warm_hitrate_by_layer.png)
 
+Minimax-M2-6bit:
+![Minimax-M2-6bit: hit rate by layer](img/minimax-m2-6bit/warm_hitrate_by_layer.png)
+
 Same as with cold cache, much lower hit rates for first layers, which has higher diversity.
 
 #### Prompt differences/expert overlap
 
 Qwen3-235B-A22B-6bit:
-![expert overlap](img/Qwen3-235B-A22B-Instruct-2507-6bit/expert_overlap_bars.png)
+![Qwen3-235B-A22B-6bit: expert overlap](img/Qwen3-235B-A22B-Instruct-2507-6bit/expert_overlap_bars.png)
 
 GLM-4.6-4bit:
-![expert overlap](img/GLM-4.6-4bit/expert_overlap_bars.png)
+![GLM-4.6-4bit: expert overlap](img/GLM-4.6-4bit/expert_overlap_bars.png)
+
+Minimax-M2-6bit:
+![Minimax-M2-6bit: expert overlap](img/minimax-m2-6bit/expert_overlap_bars.png)
 
 We can see that for first layers almost all experts are needed for both prompts, and for the rest, we have a large shared portion, smaller set of experts exclusive to each prompt and a small subset unused entirely.
 
@@ -92,10 +100,13 @@ Here we measure overall cache hit rate as a function of initial warmup strategy:
 * cache initialized with usage from aggregated data.
 
 Qwen3-235B-A22B-6bit:
-![Qwen3: hit rate by layer](img/Qwen3-235B-A22B-Instruct-2507-6bit/warmup_comparison.png)
+![Qwen3: warmup comparison](img/Qwen3-235B-A22B-Instruct-2507-6bit/warmup_comparison.png)
 
 GLM-4.6-4bit:
-![GLM-4.6: hit rate by layer](img/GLM-4.6-4bit/warmup_comparison.png)
+![GLM-4.6: warmup comparison](img/GLM-4.6-4bit/warmup_comparison.png)
+
+Minimax-M2-6bit:
+![Minimax-M2-6bit: warmup comparison](img/minimax-m2-6bit/warmup_comparison.png)
 
 
 ### tokens-per-second measurements
