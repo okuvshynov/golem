@@ -199,6 +199,28 @@ Prompt: 4374 tokens, 118.0 t/s
 Generation: 512 tokens, 12.6 t/s
 ```
 
+### Speculative Decoding Statistics Tool
+
+The `scripts/speculative_stats.py` script provides detailed statistics for speculative decoding with mlx_lm. This is useful for analyzing draft model performance and tuning speculative decoding parameters.
+
+Usage:
+```
+python scripts/speculative_stats.py \
+    --model ./path/to/main-model \
+    --draft-model ./path/to/draft-model \
+    -p "Your prompt" \
+    --max-tokens 512 \
+    --num-draft-tokens 4
+```
+
+The tool provides:
+- Live statistics during generation (acceptance rate, rolling averages)
+- Overall accept rate and per-step statistics
+- Distribution of accepted tokens per verification step
+- Accept rate evolution (comparing first vs last 20% of generation)
+
+This helps evaluate how well a draft model matches a target model, which is relevant for the speculative prefetch optimization discussed below.
+
 ### Conclusion
 
 Even with current substantially suboptimal implementation (and hardware selection), we can run models which would not fit into fast unified memory at reasonable tps.
