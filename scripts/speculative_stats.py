@@ -9,10 +9,12 @@ Usage:
         --num-draft-tokens 16
 """
 
+import csv
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import List, Tuple, Optional, Callable, Any, Generator
+from pathlib import Path
+from typing import List, Tuple, Optional, Callable, Any, Generator, TextIO
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -35,6 +37,24 @@ class SpeculativeStats:
     total_steps: int = 0
     step_history: List[Tuple[int, int]] = field(default_factory=list)
     step_times: List[float] = field(default_factory=list)
+    csv_file: Optional[TextIO] = field(default=None, repr=False)
+    csv_writer: Optional[csv.writer] = field(default=None, repr=False)
+
+    def init_csv(self, path: str):
+        """Initialize CSV logging to the given path."""
+        self.csv_file = open(path, 'w', newline='')
+        self.csv_writer = csv.writer(self.csv_file)
+        self.csv_writer.writerow([
+            'step', 'accepted', 'attempted', 'step_time_sec',
+            'cumulative_accepted', 'cumulative_attempted', 'cumulative_accept_rate'
+        ])
+
+    def close_csv(self):
+        """Close the CSV file if open."""
+        if self.csv_file:
+            self.csv_file.close()
+            self.csv_file = None
+            self.csv_writer = None
 
     def record_step(self, accepted: int, attempted: int, step_time: float = 0.0):
         self.total_draft_tokens += attempted
@@ -42,6 +62,17 @@ class SpeculativeStats:
         self.total_steps += 1
         self.step_history.append((accepted, attempted))
         self.step_times.append(step_time)
+
+        if self.csv_writer:
+            self.csv_writer.writerow([
+                self.total_steps,
+                accepted,
+                attempted,
+                f"{step_time:.6f}",
+                self.accepted_draft_tokens,
+                self.total_draft_tokens,
+                f"{self.accept_rate:.6f}"
+            ])
 
     @property
     def accept_rate(self) -> float:
@@ -288,6 +319,7 @@ def generate_with_stats(
     draft_model: Optional[nn.Module] = None,
     num_draft_tokens: int = 3,
     live_stats: bool = True,
+    csv_path: Optional[str] = None,
     **kwargs,
 ) -> Tuple[str, SpeculativeStats]:
     """
@@ -309,6 +341,8 @@ def generate_with_stats(
     prompt_array = mx.array(prompt_tokens)
 
     stats = SpeculativeStats()
+    if csv_path:
+        stats.init_csv(csv_path)
     detokenizer = tokenizer.detokenizer
 
     sampler = kwargs.pop('sampler', None)
@@ -351,6 +385,10 @@ def generate_with_stats(
     print(f"Generation: {n + 1} tokens, {gen_tps:.3f} tokens-per-sec")
     print(f"Peak memory: {mx.get_peak_memory() / 1e9:.3f} GB")
 
+    if csv_path:
+        stats.close_csv()
+        print(f"Speculation log saved to: {csv_path}")
+
     return text, stats
 
 
@@ -371,6 +409,7 @@ def main():
     parser.add_argument("--top-k", type=int, default=0, help="Top-k sampling")
     parser.add_argument("--seed", type=int, default=None, help="Random seed")
     parser.add_argument("--no-live", action="store_true", help="Disable live stats")
+    parser.add_argument("--csv", type=str, default=None, help="Path to CSV file for logging speculation results")
     parser.add_argument("--trust-remote-code", action="store_true", help="Trust remote code")
     parser.add_argument("--ignore-chat-template", action="store_true", help="Ignore chat template")
     parser.add_argument("--system-prompt", type=str, default=None, help="System prompt")
@@ -426,6 +465,7 @@ def main():
         num_draft_tokens=args.num_draft_tokens,
         sampler=sampler,
         live_stats=not args.no_live,
+        csv_path=args.csv,
     )
 
     print(f"\n{'='*60}")
