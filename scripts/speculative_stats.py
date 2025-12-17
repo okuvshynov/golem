@@ -29,6 +29,21 @@ from mlx_lm.utils import load
 from mlx_lm.sample_utils import make_sampler
 
 
+def compute_confidence_metrics(logprobs: mx.array, sampled_token: int) -> Tuple[float, float, float, float]:
+    """
+    Compute entropy and distribution stats from logprobs.
+
+    Returns: (entropy, sampled_prob, top1_prob, top5_prob)
+    """
+    probs = mx.exp(logprobs)
+    entropy = float(-mx.sum(probs * logprobs))
+    sampled_prob = float(probs[sampled_token])
+    sorted_probs = mx.sort(probs)[::-1]  # descending
+    top1_prob = float(sorted_probs[0])
+    top5_prob = float(mx.sum(sorted_probs[:5]))
+    return entropy, sampled_prob, top1_prob, top5_prob
+
+
 @dataclass
 class SpeculativeStats:
     """Detailed statistics for speculative decoding."""
@@ -41,12 +56,13 @@ class SpeculativeStats:
     csv_writer: Optional[csv.writer] = field(default=None, repr=False)
 
     def init_csv(self, path: str):
-        """Initialize CSV logging to the given path."""
+        """Initialize CSV logging to the given path (per-token format)."""
         self.csv_file = open(path, 'w', newline='')
         self.csv_writer = csv.writer(self.csv_file)
         self.csv_writer.writerow([
-            'step', 'accepted', 'attempted', 'step_time_sec',
-            'cumulative_accepted', 'cumulative_attempted', 'cumulative_accept_rate'
+            'step', 'position', 'draft_token', 'main_token', 'accepted',
+            'draft_entropy', 'draft_prob', 'draft_top1_prob', 'draft_top5_prob',
+            'main_entropy', 'main_prob', 'main_top1_prob', 'main_top5_prob',
         ])
 
     def close_csv(self):
@@ -57,21 +73,41 @@ class SpeculativeStats:
             self.csv_writer = None
 
     def record_step(self, accepted: int, attempted: int, step_time: float = 0.0):
+        """Record step-level statistics (in-memory only, for summary)."""
         self.total_draft_tokens += attempted
         self.accepted_draft_tokens += accepted
         self.total_steps += 1
         self.step_history.append((accepted, attempted))
         self.step_times.append(step_time)
 
+    def record_draft_token(
+        self,
+        step: int,
+        position: int,
+        draft_token: int,
+        main_token: int,
+        accepted: bool,
+        draft_metrics: Tuple[float, float, float, float],
+        main_metrics: Tuple[float, float, float, float],
+    ):
+        """Record per-draft-token statistics to CSV."""
         if self.csv_writer:
+            draft_entropy, draft_prob, draft_top1, draft_top5 = draft_metrics
+            main_entropy, main_prob, main_top1, main_top5 = main_metrics
             self.csv_writer.writerow([
-                self.total_steps,
-                accepted,
-                attempted,
-                f"{step_time:.6f}",
-                self.accepted_draft_tokens,
-                self.total_draft_tokens,
-                f"{self.accept_rate:.6f}"
+                step,
+                position,
+                draft_token,
+                main_token,
+                1 if accepted else 0,
+                f"{draft_entropy:.6f}",
+                f"{draft_prob:.6f}",
+                f"{draft_top1:.6f}",
+                f"{draft_top5:.6f}",
+                f"{main_entropy:.6f}",
+                f"{main_prob:.6f}",
+                f"{main_top1:.6f}",
+                f"{main_top5:.6f}",
             ])
 
     @property
@@ -236,13 +272,15 @@ def speculative_generate_step_with_stats(
 
     def _draft_generate(y, num_draft):
         if num_draft == 0:
-            return mx.array([], mx.uint32)
+            return mx.array([], mx.uint32), []
         ys = []
+        logprobs_list = []
         for _ in range(num_draft):
-            y, _ = _step(draft_model, draft_cache, y)
+            y, logprobs = _step(draft_model, draft_cache, y)
             mx.async_eval(y)
             ys.append(y)
-        return mx.concatenate(ys)
+            logprobs_list.append(logprobs)
+        return mx.concatenate(ys), logprobs_list
 
     with mx.stream(generation_stream):
         draft_y = _prefill(draft_model, draft_cache, y)
@@ -257,30 +295,40 @@ def speculative_generate_step_with_stats(
         while True:
             step_start = time.perf_counter()
             num_draft = min(max_tokens - ntoks, num_draft_tokens)
-            draft_tokens = _draft_generate(draft_y, num_draft)
+            draft_tokens, draft_logprobs_list = _draft_generate(draft_y, num_draft)
             if prev_tokens is not None:
                 prev_tokens = prev_tokens[: prev_tokens.size - y.size - num_draft + 1]
             y = mx.concatenate([y, draft_tokens])
-            tokens, logprobs = _step(model, model_cache, y, num_draft + 1)
+            tokens, main_logprobs = _step(model, model_cache, y, num_draft + 1)
             mx.eval(tokens, draft_tokens)
             step_time = time.perf_counter() - step_start
 
-            draft_tokens = draft_tokens.tolist()
-            tokens = tokens.tolist()
+            draft_tokens_list = draft_tokens.tolist()
+            tokens_list = tokens.tolist()
             n = 0
 
-            # Count accepted tokens in this step
+            # Count accepted tokens and log per-token metrics
             while n < num_draft:
-                tn, dtn, lpn = tokens[n], draft_tokens[n], logprobs[n]
-                if tn != dtn:
+                tn, dtn = tokens_list[n], draft_tokens_list[n]
+                accepted = (tn == dtn)
+
+                # Log per-token confidence metrics to CSV
+                if stats.csv_writer and n < len(draft_logprobs_list):
+                    draft_metrics = compute_confidence_metrics(draft_logprobs_list[n], dtn)
+                    main_metrics = compute_confidence_metrics(main_logprobs[n], tn)
+                    stats.record_draft_token(
+                        step_count + 1, n, dtn, tn, accepted, draft_metrics, main_metrics
+                    )
+
+                if not accepted:
                     break
                 n += 1
                 ntoks += 1
-                yield tn, lpn, True
+                yield tn, main_logprobs[n - 1], True
                 if ntoks == max_tokens:
                     break
 
-            # Record statistics for this step
+            # Record step-level statistics (for summary)
             stats.record_step(accepted=n, attempted=num_draft, step_time=step_time)
             step_count += 1
 
@@ -289,12 +337,12 @@ def speculative_generate_step_with_stats(
 
             if ntoks < max_tokens:
                 ntoks += 1
-                yield tokens[n], logprobs[n], False
+                yield tokens_list[n], main_logprobs[n], False
 
             if ntoks == max_tokens:
                 break
 
-            y = mx.array([tokens[n]], mx.uint32)
+            y = mx.array([tokens_list[n]], mx.uint32)
             draft_y = y
 
             if n == num_draft:
