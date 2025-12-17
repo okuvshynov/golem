@@ -29,6 +29,14 @@ from mlx_lm.utils import load
 from mlx_lm.sample_utils import make_sampler
 
 
+def compute_entropy(logprobs: mx.array) -> float:
+    """Compute entropy from logprobs (fast version for early stopping)."""
+    if logprobs.ndim > 1:
+        logprobs = logprobs.squeeze()
+    probs = mx.exp(logprobs)
+    return float(-mx.sum(probs * logprobs))
+
+
 def compute_confidence_metrics(logprobs: mx.array, sampled_token: int) -> Tuple[float, float, float, float]:
     """
     Compute entropy and distribution stats from logprobs.
@@ -207,9 +215,14 @@ def speculative_generate_step_with_stats(
     kv_group_size: int = 64,
     quantized_kv_start: int = 0,
     live_stats: bool = True,
+    entropy_threshold: Optional[float] = None,
 ) -> Generator[Tuple[mx.array, mx.array, bool], None, None]:
     """
     Wrapper around speculative_generate_step that collects detailed statistics.
+
+    Args:
+        entropy_threshold: If set, stop drafting early when entropy exceeds this value.
+                          Recommended range: 0.5-1.0 based on empirical analysis.
     """
     from mlx_lm.models import cache
     import functools
@@ -280,7 +293,7 @@ def speculative_generate_step_with_stats(
         cache.trim_prompt_cache(model_cache, num_draft - num_accept)
         cache.trim_prompt_cache(draft_cache, max(num_draft - num_accept - 1, 0))
 
-    def _draft_generate(y, num_draft):
+    def _draft_generate(y, num_draft, entropy_threshold=None):
         if num_draft == 0:
             return mx.array([], mx.uint32), []
         ys = []
@@ -290,6 +303,14 @@ def speculative_generate_step_with_stats(
             mx.async_eval(y)
             ys.append(y)
             logprobs_list.append(logprobs)
+
+            # Early stopping based on entropy threshold
+            if entropy_threshold is not None:
+                mx.eval(y)  # Need actual value for entropy computation
+                entropy = compute_entropy(logprobs)
+                if entropy > entropy_threshold:
+                    break
+
         return mx.concatenate(ys), logprobs_list
 
     with mx.stream(generation_stream):
@@ -308,17 +329,20 @@ def speculative_generate_step_with_stats(
 
             # Time draft generation
             draft_start = time.perf_counter()
-            draft_tokens, draft_logprobs_list = _draft_generate(draft_y, num_draft)
+            draft_tokens, draft_logprobs_list = _draft_generate(draft_y, num_draft, entropy_threshold)
             mx.eval(draft_tokens)  # Ensure draft generation is complete
             draft_time = time.perf_counter() - draft_start
 
+            # Actual number drafted (may be less due to early stopping)
+            actual_drafted = len(draft_logprobs_list)
+
             if prev_tokens is not None:
-                prev_tokens = prev_tokens[: prev_tokens.size - y.size - num_draft + 1]
+                prev_tokens = prev_tokens[: prev_tokens.size - y.size - actual_drafted + 1]
             y = mx.concatenate([y, draft_tokens])
 
             # Time main model verification
             verify_start = time.perf_counter()
-            tokens, main_logprobs = _step(model, model_cache, y, num_draft + 1)
+            tokens, main_logprobs = _step(model, model_cache, y, actual_drafted + 1)
             mx.eval(tokens)  # Ensure verification is complete
             verify_time = time.perf_counter() - verify_start
 
@@ -329,7 +353,7 @@ def speculative_generate_step_with_stats(
             n = 0
 
             # Count accepted tokens and log per-token metrics
-            while n < num_draft:
+            while n < actual_drafted:
                 tn, dtn = tokens_list[n], draft_tokens_list[n]
                 accepted = (tn == dtn)
 
@@ -339,7 +363,7 @@ def speculative_generate_step_with_stats(
                     main_metrics = compute_confidence_metrics(main_logprobs[n], tn)
                     stats.record_draft_token(
                         step_count + 1, n, dtn, tn, accepted, draft_metrics, main_metrics,
-                        draft_time * 1000, verify_time * 1000, num_draft,
+                        draft_time * 1000, verify_time * 1000, actual_drafted,
                     )
 
                 if not accepted:
@@ -351,7 +375,7 @@ def speculative_generate_step_with_stats(
                     break
 
             # Record step-level statistics (for summary)
-            stats.record_step(accepted=n, attempted=num_draft, step_time=step_time)
+            stats.record_step(accepted=n, attempted=actual_drafted, step_time=step_time)
             step_count += 1
 
             if live_stats:
@@ -367,16 +391,16 @@ def speculative_generate_step_with_stats(
             y = mx.array([tokens_list[n]], mx.uint32)
             draft_y = y
 
-            if n == num_draft:
+            if n == actual_drafted:
                 draft_y = mx.concatenate(
                     [mx.array(draft_tokens[-1:], mx.uint32), draft_y]
                 )
 
             if prev_tokens is not None:
-                prev_tokens = prev_tokens[: -max(num_draft - n, 1)]
-            _rewind_cache(num_draft, n)
+                prev_tokens = prev_tokens[: -max(actual_drafted - n, 1)]
+            _rewind_cache(actual_drafted, n)
     finally:
-        _rewind_cache(num_draft, n)
+        _rewind_cache(actual_drafted, n)
         if live_stats:
             print()  # Newline after live stats
 
@@ -390,10 +414,14 @@ def generate_with_stats(
     num_draft_tokens: int = 3,
     live_stats: bool = True,
     csv_path: Optional[str] = None,
+    entropy_threshold: Optional[float] = None,
     **kwargs,
 ) -> Tuple[str, SpeculativeStats]:
     """
     Generate text with speculative decoding and return detailed statistics.
+
+    Args:
+        entropy_threshold: If set, stop drafting early when entropy exceeds this value.
     """
     from mlx_lm.tokenizer_utils import TokenizerWrapper
 
@@ -426,6 +454,7 @@ def generate_with_stats(
         max_tokens=max_tokens,
         sampler=sampler,
         live_stats=live_stats,
+        entropy_threshold=entropy_threshold,
         **kwargs,
     )
 
@@ -480,6 +509,8 @@ def main():
     parser.add_argument("--seed", type=int, default=None, help="Random seed")
     parser.add_argument("--no-live", action="store_true", help="Disable live stats")
     parser.add_argument("--csv", type=str, default=None, help="Path to CSV file for logging speculation results")
+    parser.add_argument("--entropy-threshold", type=float, default=None,
+                        help="Stop drafting early when entropy exceeds this value (recommended: 0.5-1.0)")
     parser.add_argument("--trust-remote-code", action="store_true", help="Trust remote code")
     parser.add_argument("--ignore-chat-template", action="store_true", help="Ignore chat template")
     parser.add_argument("--system-prompt", type=str, default=None, help="System prompt")
@@ -536,6 +567,7 @@ def main():
         sampler=sampler,
         live_stats=not args.no_live,
         csv_path=args.csv,
+        entropy_threshold=args.entropy_threshold,
     )
 
     print(f"\n{'='*60}")
