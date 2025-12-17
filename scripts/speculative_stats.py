@@ -66,6 +66,7 @@ class SpeculativeStats:
             'step', 'position', 'draft_token', 'main_token', 'accepted',
             'draft_entropy', 'draft_prob', 'draft_top1_prob', 'draft_top5_prob',
             'main_entropy', 'main_prob', 'main_top1_prob', 'main_top5_prob',
+            'draft_time_ms', 'verify_time_ms', 'num_drafted',
         ])
 
     def close_csv(self):
@@ -92,6 +93,9 @@ class SpeculativeStats:
         accepted: bool,
         draft_metrics: Tuple[float, float, float, float],
         main_metrics: Tuple[float, float, float, float],
+        draft_time_ms: float,
+        verify_time_ms: float,
+        num_drafted: int,
     ):
         """Record per-draft-token statistics to CSV."""
         if self.csv_writer:
@@ -111,6 +115,9 @@ class SpeculativeStats:
                 f"{main_prob:.6f}",
                 f"{main_top1:.6f}",
                 f"{main_top5:.6f}",
+                f"{draft_time_ms:.3f}",
+                f"{verify_time_ms:.3f}",
+                num_drafted,
             ])
 
     @property
@@ -298,12 +305,23 @@ def speculative_generate_step_with_stats(
         while True:
             step_start = time.perf_counter()
             num_draft = min(max_tokens - ntoks, num_draft_tokens)
+
+            # Time draft generation
+            draft_start = time.perf_counter()
             draft_tokens, draft_logprobs_list = _draft_generate(draft_y, num_draft)
+            mx.eval(draft_tokens)  # Ensure draft generation is complete
+            draft_time = time.perf_counter() - draft_start
+
             if prev_tokens is not None:
                 prev_tokens = prev_tokens[: prev_tokens.size - y.size - num_draft + 1]
             y = mx.concatenate([y, draft_tokens])
+
+            # Time main model verification
+            verify_start = time.perf_counter()
             tokens, main_logprobs = _step(model, model_cache, y, num_draft + 1)
-            mx.eval(tokens, draft_tokens)
+            mx.eval(tokens)  # Ensure verification is complete
+            verify_time = time.perf_counter() - verify_start
+
             step_time = time.perf_counter() - step_start
 
             draft_tokens_list = draft_tokens.tolist()
@@ -320,7 +338,8 @@ def speculative_generate_step_with_stats(
                     draft_metrics = compute_confidence_metrics(draft_logprobs_list[n], dtn)
                     main_metrics = compute_confidence_metrics(main_logprobs[n], tn)
                     stats.record_draft_token(
-                        step_count + 1, n, dtn, tn, accepted, draft_metrics, main_metrics
+                        step_count + 1, n, dtn, tn, accepted, draft_metrics, main_metrics,
+                        draft_time * 1000, verify_time * 1000, num_draft,
                     )
 
                 if not accepted:
