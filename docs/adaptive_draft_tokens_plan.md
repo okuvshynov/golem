@@ -120,8 +120,72 @@ df = pd.read_csv('/tmp/speculation_detailed.csv')
 df.groupby('accepted')['draft_entropy'].describe()
 ```
 
-## Future Steps (not in this PR)
-1. Analyze logged data to find confidence thresholds
+## Phase 1 Results (COMPLETED)
+
+### Test Configuration
+- **Main model**: Devstral-2-123B-Instruct-2512-8bit
+- **Draft model**: Devstral-Small-2-24B-Instruct-2512-MLX-4Bit
+- **Prompt**: "Explain a difference between concurrency and parallelism, illustrate in Python, Go, Rust and C++"
+- **Settings**: max_tokens=2048, num_draft_tokens=8
+
+### Key Findings
+
+#### Entropy strongly predicts acceptance
+| Metric | Accepted | Rejected |
+|--------|----------|----------|
+| Mean entropy | 0.098 | 1.028 |
+| Mean top-1 prob | 0.969 | 0.616 |
+
+**Correlation**: -0.63 (strong negative correlation between entropy and acceptance)
+
+#### Entropy threshold analysis
+| Threshold | Tokens | Rejection Rate |
+|-----------|--------|----------------|
+| entropy > 0.5 | 194 | 41.8% |
+| entropy > 1.0 | 73 | 60.3% |
+| entropy > 1.5 | 21 | 71.4% |
+| entropy > 2.0 | 4 | 100% |
+
+#### Position analysis
+Rejection rate is fairly uniform across positions (4-10%), suggesting position is not a strong predictor.
+
+### Implications for Phase 2
+1. **Entropy-based early stopping is viable**: Threshold around 0.5-1.0 could save compute
+2. **Draft top-1 probability** also useful: < 0.7 correlates with higher rejection
+3. **Position doesn't matter much**: No need for position-dependent thresholds
+
+---
+
+## Phase 2: Adaptive Implementation (TODO)
+
+### Approach A: Entropy-based early stopping
+During draft generation, stop early if entropy exceeds threshold:
+```python
+for i in range(max_draft):
+    y, logprobs = _step(draft_model, ...)
+    entropy = compute_entropy(logprobs)
+    if entropy > THRESHOLD:  # e.g., 0.5-1.0
+        break
+    draft_tokens.append(y)
+```
+
+### Approach B: Historical accept rate adjustment
+Adjust n_draft based on rolling accept rate:
+```python
+if rolling_accept_rate > 0.8:
+    n_draft = min(n_draft + 1, 16)
+elif rolling_accept_rate < 0.4:
+    n_draft = max(n_draft - 1, 2)
+```
+
+### Approach C: Combined (recommended)
+1. Set max_n_draft from rolling accept rate (upper bound)
+2. Use entropy threshold for early stopping (dynamic lower bound)
+3. Bounds: [2, 16]
+
+## Future Steps
+1. ~~Analyze logged data to find confidence thresholds~~ DONE
 2. Implement early stopping based on entropy threshold
 3. Implement adaptive n_draft based on rolling accept rate
 4. Combine both approaches with sanity guards [2, 16]
+5. A/B test different threshold values
