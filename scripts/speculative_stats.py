@@ -35,6 +35,9 @@ def compute_confidence_metrics(logprobs: mx.array, sampled_token: int) -> Tuple[
 
     Returns: (entropy, sampled_prob, top1_prob, top5_prob)
     """
+    # Ensure logprobs is 1D (vocab_size,)
+    if logprobs.ndim > 1:
+        logprobs = logprobs.squeeze()
     probs = mx.exp(logprobs)
     entropy = float(-mx.sum(probs * logprobs))
     sampled_prob = float(probs[sampled_token])
