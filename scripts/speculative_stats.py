@@ -65,6 +65,9 @@ class SpeculativeStats:
     step_times: List[float] = field(default_factory=list)
     csv_file: Optional[TextIO] = field(default=None, repr=False)
     csv_writer: Optional[csv.writer] = field(default=None, repr=False)
+    # Overall timing
+    total_time: float = 0.0
+    total_tokens: int = 0
 
     def init_csv(self, path: str):
         """Initialize CSV logging to the given path (per-token format)."""
@@ -149,6 +152,11 @@ class SpeculativeStats:
         print(f"\n{'='*60}")
         print("SPECULATIVE DECODING STATISTICS")
         print(f"{'='*60}")
+        if self.total_time > 0:
+            total_tps = self.total_tokens / self.total_time
+            print(f"Total time:                  {self.total_time:.2f}s")
+            print(f"Total throughput:            {total_tps:.2f} tokens/sec")
+            print()
         print(f"Total verification steps:    {self.total_steps}")
         print(f"Draft tokens attempted:      {self.total_draft_tokens}")
         print(f"Draft tokens accepted:       {self.accepted_draft_tokens}")
@@ -481,13 +489,11 @@ def generate_with_stats(
         gen_time = time.perf_counter() - tic
         gen_tps = (n + 1) / gen_time if gen_time > 0 else 0
 
-    total_time = time.perf_counter() - total_start
-    total_tokens = prompt_array.size + n + 1
-    total_tps = total_tokens / total_time if total_time > 0 else 0
+    stats.total_time = time.perf_counter() - total_start
+    stats.total_tokens = prompt_array.size + n + 1
 
     print(f"\nPrompt: {prompt_array.size} tokens, {prompt_tps:.3f} tokens-per-sec")
     print(f"Generation: {n + 1} tokens, {gen_tps:.3f} tokens-per-sec")
-    print(f"Total: {total_time:.2f}s, {total_tps:.2f} tokens-per-sec (prompt+gen)")
     print(f"Peak memory: {mx.get_peak_memory() / 1e9:.3f} GB")
 
     if csv_path:
