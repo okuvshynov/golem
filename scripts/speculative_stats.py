@@ -459,6 +459,7 @@ def generate_with_stats(
     )
 
     text = ""
+    total_start = time.perf_counter()
     with wired_limit(model, [generation_stream]):
         tic = time.perf_counter()
         for n, (token, logprobs, from_draft) in enumerate(token_generator):
@@ -480,8 +481,13 @@ def generate_with_stats(
         gen_time = time.perf_counter() - tic
         gen_tps = (n + 1) / gen_time if gen_time > 0 else 0
 
+    total_time = time.perf_counter() - total_start
+    total_tokens = prompt_array.size + n + 1
+    total_tps = total_tokens / total_time if total_time > 0 else 0
+
     print(f"\nPrompt: {prompt_array.size} tokens, {prompt_tps:.3f} tokens-per-sec")
     print(f"Generation: {n + 1} tokens, {gen_tps:.3f} tokens-per-sec")
+    print(f"Total: {total_time:.2f}s, {total_tps:.2f} tokens-per-sec (prompt+gen)")
     print(f"Peak memory: {mx.get_peak_memory() / 1e9:.3f} GB")
 
     if csv_path:
